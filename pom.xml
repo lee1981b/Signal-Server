@@ -71,7 +71,7 @@
     <semver4j.version>3.1.0</semver4j.version>
     <slf4j.version>2.0.13</slf4j.version>
     <stripe.version>23.10.0</stripe.version>
-    <swagger.version>2.2.22</swagger.version>
+    <swagger.version>2.2.24</swagger.version>
 
     <!-- 21.0.4_7-jre-jammy (note: always use the multi-arch manifest *LIST* here) -->
     <docker.image.sha256>870aae69d4521fdaf26e952f8026f75b37cb721e6302d4d4d7100f6b09823057</docker.image.sha256>
