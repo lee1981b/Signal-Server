@@ -16,6 +16,13 @@ package kt_query;
   */
 service KeyTransparencyQueryService {
   /**
+   * An endpoint used by clients to retrieve the most recent distinguished tree
+   * head, which should be used to derive consistency parameters for
+   * subsequent Search and Monitor requests. It should be the first key
+   * transparency RPC a client calls.
+   */
+  rpc Distinguished(DistinguishedRequest) returns (SearchResponse) {}
+  /**
    * An endpoint used by clients to search for a given key in the transparency log.
    * The server returns proof that the search key exists in the log.
    */
@@ -48,8 +55,19 @@ message ConsistencyParameters {
   optional uint64 distinguished = 2;
 }
 
-// TODO: add a `value` field so that the KT server can verify that the given search key is mapped
-// to the provided value.
+/**
+ * DistinguishedRequest looks up the most recent distinguished key in the
+ * transparency log.
+ */
+message DistinguishedRequest {
+  /**
+   * The tree size of the client's last verified distinguished request. With the
+   * exception of a client's very first request, this field should always be
+   * set.
+   */
+  optional uint64 last = 1;
+}
+
 message SearchRequest {
   /**
    * The key to look up in the log tree.
@@ -67,6 +85,16 @@ message SearchRequest {
    * The tree head size(s) to prove consistency against.
    */
   ConsistencyParameters consistency = 3;
+  /**
+   * Clients need to prove that they know the search key to value mapping
+   * to avoid the key transparency service leaking user data.
+   * If the client is looking up the distinguished key, this field may be empty.
+   */
+  optional bytes mapped_value = 4;
+  /**
+   * Clients should only provide the unidentified_access_key if the search key is a phone number.
+   */
+  optional bytes unidentified_access_key = 5;
 }
 
 message SearchResponse {

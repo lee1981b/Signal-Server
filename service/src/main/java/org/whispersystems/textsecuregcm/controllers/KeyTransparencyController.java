@@ -11,12 +11,38 @@ import io.dropwizard.auth.Auth;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import javax.validation.Valid;
+import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Positive;
+import javax.ws.rs.BadRequestException;
+import javax.ws.rs.ForbiddenException;
+import javax.ws.rs.GET;
+import javax.ws.rs.NotFoundException;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
+import javax.ws.rs.ServerErrorException;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
 import org.signal.keytransparency.client.MonitorKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.entities.KeyTransparencyDistinguishedKeyResponse;
 import org.whispersystems.textsecuregcm.entities.KeyTransparencyMonitorRequest;
 import org.whispersystems.textsecuregcm.entities.KeyTransparencyMonitorResponse;
 import org.whispersystems.textsecuregcm.entities.KeyTransparencySearchRequest;
@@ -27,28 +53,6 @@ import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.util.ExceptionUtils;
 import org.whispersystems.websocket.auth.ReadOnly;
 
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.ForbiddenException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.ServerErrorException;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-
 @Path("/v1/key-transparency")
 @Tag(name = "KeyTransparency")
 public class KeyTransparencyController {
@@ -56,8 +60,10 @@ public class KeyTransparencyController {
   private static final Logger LOGGER = LoggerFactory.getLogger(KeyTransparencyController.class);
   @VisibleForTesting
   static final Duration KEY_TRANSPARENCY_RPC_TIMEOUT = Duration.ofSeconds(15);
-  private static final byte USERNAME_PREFIX = (byte) 'u';
-  private static final byte E164_PREFIX = (byte) 'n';
+  @VisibleForTesting
+  static final byte USERNAME_PREFIX = (byte) 'u';
+  @VisibleForTesting
+  static final byte E164_PREFIX = (byte) 'n';
   @VisibleForTesting
   static final byte ACI_PREFIX = (byte) 'a';
   private final KeyTransparencyServiceClient keyTransparencyServiceClient;
@@ -74,9 +80,10 @@ public class KeyTransparencyController {
           """
   )
   @ApiResponse(responseCode = "200", description = "All search key lookups were successful", useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Invalid request. See response for any available details.")
   @ApiResponse(responseCode = "403", description = "At least one search key lookup to value mapping was invalid")
   @ApiResponse(responseCode = "404", description = "At least one search key lookup did not find the key")
-  @ApiResponse(responseCode = "413", description = "Ratelimited")
+  @ApiResponse(responseCode = "429", description = "Rate-limited")
   @ApiResponse(responseCode = "422", description = "Invalid request format")
   @POST
   @Path("/search")
@@ -92,6 +99,8 @@ public class KeyTransparencyController {
     try {
       final CompletableFuture<byte[]> aciSearchKeyResponseFuture = keyTransparencyServiceClient.search(
           getFullSearchKeyByteString(ACI_PREFIX, request.aci().toCompactByteArray()),
+          ByteString.copyFrom(request.aciIdentityKey().serialize()),
+          Optional.empty(),
           request.lastTreeHeadSize(),
           request.distinguishedTreeHeadSize(),
           KEY_TRANSPARENCY_RPC_TIMEOUT);
@@ -99,6 +108,8 @@ public class KeyTransparencyController {
       final CompletableFuture<byte[]> e164SearchKeyResponseFuture = request.e164()
           .map(e164 -> keyTransparencyServiceClient.search(
               getFullSearchKeyByteString(E164_PREFIX, e164.getBytes(StandardCharsets.UTF_8)),
+              ByteString.copyFrom(request.aci().toCompactByteArray()),
+              Optional.of(ByteString.copyFrom(request.unidentifiedAccessKey().get())),
               request.lastTreeHeadSize(),
               request.distinguishedTreeHeadSize(),
               KEY_TRANSPARENCY_RPC_TIMEOUT))
@@ -107,6 +118,8 @@ public class KeyTransparencyController {
       final CompletableFuture<byte[]> usernameHashSearchKeyResponseFuture = request.usernameHash()
           .map(usernameHash -> keyTransparencyServiceClient.search(
               getFullSearchKeyByteString(USERNAME_PREFIX, request.usernameHash().get()),
+              ByteString.copyFrom(request.aci().toCompactByteArray()),
+              Optional.empty(),
               request.lastTreeHeadSize(),
               request.distinguishedTreeHeadSize(),
               KEY_TRANSPARENCY_RPC_TIMEOUT))
@@ -137,8 +150,9 @@ public class KeyTransparencyController {
           """
   )
   @ApiResponse(responseCode = "200", description = "All search keys exist in the log", useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Invalid request. See response for any available details.")
   @ApiResponse(responseCode = "404", description = "At least one search key lookup did not find the key")
-  @ApiResponse(responseCode = "413", description = "Ratelimited")
+  @ApiResponse(responseCode = "429", description = "Rate-limited")
   @ApiResponse(responseCode = "422", description = "Invalid request format")
   @POST
   @Path("/monitor")
@@ -173,6 +187,44 @@ public class KeyTransparencyController {
           request.lastNonDistinguishedTreeHeadSize(),
           request.lastDistinguishedTreeHeadSize(),
           KEY_TRANSPARENCY_RPC_TIMEOUT).join());
+    } catch (final CancellationException exception) {
+      LOGGER.error("Unexpected cancellation from key transparency service", exception);
+      throw new ServerErrorException(Response.Status.SERVICE_UNAVAILABLE, exception);
+    } catch (final CompletionException exception) {
+      handleKeyTransparencyServiceError(exception);
+    }
+    // This is unreachable
+    return null;
+  }
+
+  @Operation(
+      summary = "Get the current value of the distinguished key",
+      description = """
+          Enforced unauthenticated endpoint. The response contains the distinguished tree head to prove consistency
+          against for future calls to `/search` and `/distinguished`.
+          """
+  )
+  @ApiResponse(responseCode = "200", description = "The `distinguished` search key exists in the log", useReturnTypeSchema = true)
+  @ApiResponse(responseCode = "400", description = "Invalid request. See response for any available details.")
+  @ApiResponse(responseCode = "422", description = "Invalid request format")
+  @ApiResponse(responseCode = "429", description = "Rate-limited")
+  @GET
+  @Path("/distinguished")
+  @RateLimitedByIp(RateLimiters.For.KEY_TRANSPARENCY_DISTINGUISHED_PER_IP)
+  @Produces(MediaType.APPLICATION_JSON)
+  public KeyTransparencyDistinguishedKeyResponse getDistinguishedKey(
+      @ReadOnly @Auth final Optional<AuthenticatedDevice> authenticatedAccount,
+
+      @Parameter(description = "The distinguished tree head size returned by a previously verified call")
+      @QueryParam("lastTreeHeadSize") @Valid final Optional<@Positive Long> lastTreeHeadSize) {
+
+    // Disallow clients from making authenticated requests to this endpoint
+    requireNotAuthenticated(authenticatedAccount);
+
+    try {
+      return keyTransparencyServiceClient.getDistinguishedKey(lastTreeHeadSize, KEY_TRANSPARENCY_RPC_TIMEOUT)
+          .thenApply(KeyTransparencyDistinguishedKeyResponse::new)
+          .join();
     } catch (final CancellationException exception) {
       LOGGER.error("Unexpected cancellation from key transparency service", exception);
       throw new ServerErrorException(Response.Status.SERVICE_UNAVAILABLE, exception);
